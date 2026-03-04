@@ -19,7 +19,7 @@
 
 ## **Table naming conventions**
 ### Bronze and Silver Layers
-On these layers, I won't be renaming nor changing their data model, therefore, they will have the same structure and conventions.
+On these layers, they will have the same structure and conventions. The bronze layer will have the same names as the source system, and the silver layer will have almost all the same names as the bronze layer, excluding some new columns to make the data clearer.
 - All names must start with the source system name, and table names must match their original names verbatim.
 -  **`<sourcesystem>_<entity>`** 
   - `<sourcesystem>`: Name of the source system (e.g., `crm`, `erp`).  

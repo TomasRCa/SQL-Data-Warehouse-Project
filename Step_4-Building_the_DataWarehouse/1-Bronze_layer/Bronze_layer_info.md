@@ -1,5 +1,5 @@
 # **🏗️Building the bronze layer**
-### To build the bronze layer, 3 steps are required: 
+### To build the bronze layer, 2 steps are required: 
 - Analyzing the source system
 - Ingesting the data and validating the schemas and completeness of the data
 
@@ -31,7 +31,7 @@
         - Tokens? SSH? Keys?
 
 ## **Ingesting the Data and validating the schemas and completeness of the data**
-The CSV files already have the columns, and since it was set before that the names should stay unchanged for this layer, I'm using the following queries to define the structure of the DataWarehouse:
+The CSV files already have the columns, and since it was set before that the names should stay unchanged for this layer, I'm using the following queries to define the structure of the bronze layer:
 ### Creating the tables
 ```SQL
 CREATE TABLE bronze.crm_cust_info (
@@ -205,9 +205,9 @@ BEGIN
     RAISE NOTICE '==========================================';
     RAISE NOTICE 'Loading Bronze Layer Completed';
 	RAISE NOTICE '>> Load Duration: % hours % minutes % seconds',
-    EXTRACT(HOUR FROM (end_time - start_time)),
-    EXTRACT(MINUTE FROM (end_time - start_time)),
-    EXTRACT(SECOND FROM (end_time - start_time));
+    EXTRACT(HOUR FROM (batch_end_time - batch_start_time)),
+	EXTRACT(MINUTE FROM (batch_end_time - batch_start_time)),
+	EXTRACT(SECOND FROM (batch_end_time - batch_start_time));
     RAISE NOTICE '==========================================';
 EXCEPTION
     WHEN OTHERS THEN
@@ -225,4 +225,5 @@ CALL bronze.load_bronze();
 ```
 
 Here's how it looks like inside the PGAdmin:
+
 ![Bronze procedure](https://raw.githubusercontent.com/TomasRCa/SQL-Data-Warehouse-Project/main/Step_4-Building_the_DataWarehouse/1-Bronze_layer/Bronze%20procedure.jpg)
