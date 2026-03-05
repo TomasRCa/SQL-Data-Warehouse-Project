@@ -1,0 +1,348 @@
+# **🏗️Building the gold layer**
+### To build the silver layer, 2 steps are required: 
+- Analyze and understand the business objects
+- Plan and build the Schema
+
+## **Analyze and understand the business objects**
+
+In the gold layer is where the data needs to be ready for consumption by the Business Stakeholders and Data Analysts. To do this, I'll start by identifying the business objects in the source systems. To do this, I'll split them into 3 categories: Product, Costumer and Sales.
+Here's a visual representation:
+
+![business_objects](business_objects.jpg)
+
+## **Plan and build the Schema**
+
+The gold layer won't have a load process, instead, it will be built around **VIEWS** on a Star Schema Data Model. Since this DataWarehouse is aimed towards queries and analytics over storage optimization, a Star Schema is chosen over a Snowflake one.
+With this in mind, I'll go over the aggregations needed on the customer tables first.
+
+### **Customers**
+
+1. Checking for duplicates in the aggregation of all the information of the customers
+
+```SQL
+SELECT cst_id, COUNT(*) FROM
+	(SELECT
+	ci.cst_id,
+	ci.cst_key,
+	ci.cst_firstname,
+	ci.cst_lastname,
+	ci.cst_marital_status,
+	ci.cst_gndr,
+	ci.cst_create_date,
+	ca.bdate,
+	ca.gen,
+	la.cntry
+	FROM silver.crm_cust_info ci
+	LEFT JOIN silver.erp_cust_az12 ca
+	ON ci.cst_key = ca.cid
+	LEFT JOIN silver.erp_loc_a101 la
+	ON ci.cst_key = la.cid
+	) GROUP BY cst_id
+	HAVING COUNT(*) > 1;
+```
+
+The result of this query is empty, meaning there are no duplicates. This means the transformations on the silver layer were properly made.
+
+2. Integration of the 2 gender columns
+
+```SQL
+SELECT
+ci.cst_id,
+ci.cst_key,
+ci.cst_firstname,
+ci.cst_lastname,
+ci.cst_marital_status,
+ci.cst_gndr,
+ci.cst_create_date,
+ca.bdate,
+ca.gen,
+la.cntry
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid;
+```
+
+With this query I'm getting 2 columns regarding gender information
+![gndr](gndr.jpg)
+
+So this signals that an integration of these 2 tables is needed. Firstly, I'll check if the rows match match between these 2 with the following query:
+
+```SQL
+SELECT DISTINCT
+ci.cst_gndr,
+ca.gen
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+ORDER BY 1, 2;
+```
+
+And the results show that there are rows where the values don't match between the 2 tables:
+
+![gndr_wrong](gndr_wrong.jpg)
+
+To address this, I'd need to contact the source system administrators to know which of the tables is the master source, but for this example I'll consider the CRM as the master, so I'll query:
+
+```SQL
+SELECT DISTINCT
+    ci.cst_gndr,
+    ca.gen,
+    CASE WHEN ci.cst_gndr != 'n/a' THEN ci.cst_gndr
+        ELSE COALESCE(ca.gen, 'n/a')
+	END AS new_gen
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid
+ORDER BY 1, 2;
+```
+
+This query addresses the problem previously mentioned as well as NULL values that come from the JOIN between the tables, meaning that some customers that exist on the crm table don't exist on the erp.
+Here's the result:
+
+![new_gen](gndr_new.jpg)
+
+And as it's visible on the image, the new column has integrated both of the gender columns together, so now, to build on the previous query:
+
+```SQL
+SELECT
+ci.cst_id,
+ci.cst_key,
+ci.cst_firstname,
+ci.cst_lastname,
+ci.cst_marital_status,
+    CASE WHEN ci.cst_gndr != 'n/a' THEN ci.cst_gndr
+        ELSE COALESCE(ca.gen, 'n/a')
+	END AS new_gen,
+ci.cst_create_date,
+ca.bdate,
+la.cntry
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid;
+```
+
+3. Renaming columns for reader and analytics friendly names, and reordering them:
+
+```SQL
+SELECT
+ci.cst_id AS customer_id,
+ci.cst_key AS customer_number,
+ci.cst_firstname AS first_name,
+ci.cst_lastname AS last_name,
+la.cntry AS country,
+    CASE WHEN ci.cst_gndr != 'n/a' THEN ci.cst_gndr
+        ELSE COALESCE(ca.gen, 'n/a')
+	END AS gender,
+ci.cst_marital_status AS marital_status,
+ca.bdate AS birthdate,
+ci.cst_create_date AS create_date
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid;
+```
+
+4. Plan on how to fit the table on the Star Schema
+
+The customer table contains descriptive information about the customers, therefore, this table will be a dimensional table in the Schema.
+
+Sometimes these dimensions tables will not have a primary key can reliably be counted on to establish a relationship with other tables, so for this, I'll create a Surrogate key (System generated unique identifier) so I can be sure that I'll be able to connect it to the other tables by adding `ROW_NUMBER() OVER (ORDER BY cst_id) AS customer_key` to the previous query. The final result is like this:
+
+```SQL
+SELECT
+ROW_NUMBER() OVER (ORDER BY cst_id) AS customer_key,
+ci.cst_id AS customer_id,
+ci.cst_key AS customer_number,
+ci.cst_firstname AS first_name,
+ci.cst_lastname AS last_name,
+la.cntry AS country,
+    CASE WHEN ci.cst_gndr != 'n/a' THEN ci.cst_gndr
+        ELSE COALESCE(ca.gen, 'n/a')
+	END AS gender,
+ci.cst_marital_status AS marital_status,
+ca.bdate AS birthdate,
+ci.cst_create_date AS create_date
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid;
+```
+
+5. Creating the VIEW for the customer dimension table
+
+For this, I'll just add the `CREATE VIEW gold.dim_customers AS` to the previous query. The result's as follows:
+
+```SQL
+CREATE VIEW gold.dim_customers AS
+SELECT
+ROW_NUMBER() OVER (ORDER BY cst_id) AS customer_key,
+ci.cst_id AS customer_id,
+ci.cst_key AS customer_number,
+ci.cst_firstname AS first_name,
+ci.cst_lastname AS last_name,
+la.cntry AS country,
+    CASE WHEN ci.cst_gndr != 'n/a' THEN ci.cst_gndr
+        ELSE COALESCE(ca.gen, 'n/a')
+	END AS gender,
+ci.cst_marital_status AS marital_status,
+ca.bdate AS birthdate,
+ci.cst_create_date AS create_date
+FROM silver.crm_cust_info ci
+LEFT JOIN silver.erp_cust_az12 ca
+ON ci.cst_key = ca.cid
+LEFT JOIN silver.erp_loc_a101 la
+ON ci.cst_key = la.cid;
+```
+
+And this is how it looks like inside PGAdmin:
+
+![dim_customer](dim_customer.jpg)
+
+### **Products**
+
+1. Filter out the historical data
+
+As set before, no historical data needs to be held, therefore, I'll start by querying:
+
+```SQL
+SELECT
+prd_id,
+cat_id,
+prd_key,
+prd_nm,
+prd_cost,
+prd_line,
+prd_start_dt
+FROM silver.crm_prd_info
+WHERE prd_end_dt IS NULL;
+```
+
+This is because on the silver layer, I set the end date of the most recent information of the product to **NULL**, meaning that it's still the ongoing information about this product.
+
+2. Joining the other product tables, reordering column order and renaming them to reader and analytics friendly names:
+
+```SQL
+SELECT
+pn.prd_id AS product_id,
+pn.prd_key AS product_number,
+pn.prd_nm AS product_name,
+pn.cat_id AS category_id,
+pc.cat AS category,
+pc.subcat AS subcategory,
+pc.maintenance AS maintenance,
+pn.prd_cost AS product_cost,
+pn.prd_line AS product_line,
+pn.prd_start_dt AS product_start_date
+FROM silver.crm_prd_info pn
+LEFT JOIN silver.erp_px_cat_g1v2 pc
+ON pn.cat_id = pc.id
+WHERE prd_end_dt IS NULL;
+```
+
+3. Plan on how to fit it into the Star Schema and Create the view.
+
+Once again this table has a lot of descriptive information, this time about the products, so it will be a dimension table. For this, I'll create a surrogate key also for the product's dimension table, as well as create the VIEW with the following query:
+
+```SQL
+CREATE VIEW gold.dim_products AS
+SELECT
+ROW_NUMBER() OVER (ORDER BY pn.prd_start_dt, pn.prd_key) AS product_key,
+pn.prd_id AS product_id,
+pn.prd_key AS product_number,
+pn.prd_nm AS product_name,
+pn.cat_id AS category_id,
+pc.cat AS category,
+pc.subcat AS subcategory,
+pc.maintenance AS maintenance,
+pn.prd_cost AS product_cost,
+pn.prd_line AS product_line,
+pn.prd_start_dt AS product_start_date
+FROM silver.crm_prd_info pn
+LEFT JOIN silver.erp_px_cat_g1v2 pc
+ON pn.cat_id = pc.id
+WHERE prd_end_dt IS NULL;
+```
+
+And this is how it looks like inside PGAdmin:
+
+![dim_product](dim_products.jpg)
+
+### **Sales**
+
+1. Connect the fact table to the rest of the dimension tables
+
+By querying: 
+
+```SQL
+SELECT
+sls_ord_num,
+sls_prd_key,
+sls_cust_id,
+sls_order_dt,
+sls_ship_dt,
+sls_due_dt,
+sls_sales,
+sls_quantity,
+sls_price
+FROM silver.crm_sales_details;
+```
+
+![sls_query](sls_query.jpg)
+
+It's visible that this table has several metrics and IDs, so this table will the fact table, so to connect it to the other dimension tables, I'll use the surrogate keys previously created by querying:
+
+```SQL
+SELECT
+sd.sls_ord_num,
+pr.product_key,
+cust.customer_id,
+sd.sls_order_dt,
+sd.sls_ship_dt,
+sd.sls_due_dt,
+sd.sls_sales,
+sd.sls_quantity,
+sd.sls_price
+FROM silver.crm_sales_details AS sd
+LEFT JOIN gold.dim_products pr
+ON sd.sls_prd_key = pr.product_number
+LEFT JOIN gold.dim_customers cust
+ON sd.sls_cust_id = cust.customer_id;
+```
+
+2. Renaming, Re-ordering and creating the VIEW:
+
+```SQL
+CREATE VIEW gold.fact_sales AS
+SELECT
+sd.sls_ord_num AS order_number,
+pr.product_key,
+cust.customer_id,
+sd.sls_order_dt AS order_date,
+sd.sls_ship_dt AS ship_date,
+sd.sls_due_dt AS due_date,
+sd.sls_sales AS sales_amount,
+sd.sls_quantity AS quantity,
+sd.sls_price AS price
+FROM silver.crm_sales_details AS sd
+LEFT JOIN gold.dim_products pr
+ON sd.sls_prd_key = pr.product_number
+LEFT JOIN gold.dim_customers cust
+ON sd.sls_cust_id = cust.customer_id;
+```
+
+Here's how it looks inside PGAdmin:
+
+![fact_sales](fact_sales.jpg)
+
+
+And here's a representation of the Star Schema:
+
+![Star_Schema](Star_Schema.jpg)
